@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/desertbit/grumble"
+	"github.com/fatih/color"
 	"github.com/kamva/mgm/v3"
 	"github.com/schollz/progressbar/v3"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -67,6 +68,10 @@ func init() {
 	done <- struct{}{}
 }
 
+func Success(format string, a ...interface{}) {
+	color.Green(format, a...)
+}
+
 func NewRecord(word, sentence, remark string) *Record {
 	return &Record{
 		Word:         word,
@@ -100,6 +105,7 @@ func main() {
 
 		Run: func(c *grumble.Context) error {
 			AddRecord(c.Args.String(Word), c.Args.String(Sentence), c.Args.String(Remark))
+			Success("添加成功")
 			return nil
 		},
 	})
