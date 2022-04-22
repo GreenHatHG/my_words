@@ -32,20 +32,26 @@ type Record struct {
 }
 
 func init() {
-	fmt.Println("开始连接数据库...")
+	done := make(chan struct{})
 	go func() {
 		bar := progressbar.NewOptions(-1,
 			progressbar.OptionSetWidth(10),
-			progressbar.OptionSetDescription("indeterminate spinner"),
-			progressbar.OptionShowIts(),
-			progressbar.OptionShowCount(),
+			progressbar.OptionSetDescription("开始连接数据库..."),
+			//progressbar.OptionShowIts(),
+			//progressbar.OptionShowCount(),
 			progressbar.OptionSpinnerType(1),
 		)
-		for i := 0; i < 10; i++ {
-			time.Sleep(50 * time.Millisecond)
-			_ = bar.Add(1)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				time.Sleep(500 * time.Millisecond)
+				_ = bar.Add(1)
+			}
 		}
 	}()
+
 	uri := "mongodb+srv://words:uoibcRPDTMx2kegm@cluster0.kb0tl.mongodb.net"
 	mgmOptions := options.Client().ApplyURI(uri).SetRetryWrites(true).
 		SetWriteConcern(writeconcern.New(writeconcern.WMajority()))
@@ -56,8 +62,9 @@ func init() {
 	if err := client.Ping(nil, nil); err != nil {
 		panic(err)
 	}
-	fmt.Println("连接数据库成功...")
-	time.Sleep(1 * time.Second)
+
+	fmt.Println("\n连接数据库成功...")
+	done <- struct{}{}
 }
 
 func NewRecord(word, sentence, remark string) *Record {
