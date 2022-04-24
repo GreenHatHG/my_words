@@ -5,9 +5,16 @@ import (
 	"github.com/desertbit/grumble"
 	"github.com/fatih/color"
 	"github.com/kamva/mgm/v3"
+	"github.com/olekukonko/tablewriter"
 	"github.com/schollz/progressbar/v3"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"gopkg.in/AlecAivazis/survey.v1"
+	"math/rand"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -72,6 +79,14 @@ func Success(format string, a ...interface{}) {
 	color.Green(format, a...)
 }
 
+func Failure(format string, a ...interface{}) {
+	color.Red(format, a...)
+}
+
+func Info(format string, a ...interface{}) {
+	color.Blue(format, a...)
+}
+
 func NewRecord(word, sentence, remark string) *Record {
 	return &Record{
 		Word:         word,
@@ -80,10 +95,115 @@ func NewRecord(word, sentence, remark string) *Record {
 	}
 }
 
+func PrintWordTable(records []*Record) {
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Word", "Sentence", "Remark"})
+	table.SetAutoMergeCells(true)
+	table.SetRowLine(true)
+	for _, record := range records {
+		for _, item := range record.WordSentence {
+			table.Append([]string{record.Word, item.Sentence, item.Remark})
+		}
+	}
+	table.Render()
+}
+
 func AddRecord(word, sentence, remark string) {
-	record := NewRecord(word, sentence, remark)
-	if err := mgm.Coll(record).Create(record); err != nil {
+	word = strings.Trim(word, "")
+	sentence = strings.Trim(sentence, "")
+	remark = strings.Trim(remark, "")
+
+	record := &Record{}
+	err := mgm.Coll(record).First(bson.M{"word": word}, record)
+	if err != nil && err != mongo.ErrNoDocuments {
 		panic(err)
+	}
+
+	//新增
+	if err == mongo.ErrNoDocuments {
+		record = NewRecord(word, sentence, remark)
+		if err := mgm.Coll(record).Create(record); err != nil {
+			panic(err)
+		}
+		Success("添加成功")
+		return
+	}
+
+	//检查是否已经有该sentence
+	for _, item := range record.WordSentence {
+		if item.Sentence == sentence {
+			Failure("该例句已经存在")
+			PrintWordTable([]*Record{record})
+			return
+		}
+	}
+
+	//合并sentence到word
+	record.WordSentence = append(record.WordSentence, WordSentence{
+		Sentence: sentence,
+		Remark:   remark,
+	})
+	if err := mgm.Coll(record).Update(record); err != nil {
+		panic(err)
+	}
+	Success(fmt.Sprintf("合并sentence到%s成功", word))
+}
+
+func DeleteRecord(word string) {
+	record := &Record{Word: word}
+	if err := mgm.Coll(record).Delete(record); err != nil {
+		panic(err)
+	}
+	Success("删除成功")
+}
+
+func AllRecord() {
+	var records []*Record
+	if err := mgm.Coll(&Record{}).SimpleFind(&records, bson.M{}); err != nil {
+		panic(err)
+	}
+	PrintWordTable(records)
+}
+
+func FindRecord(word string) {
+	record := &Record{}
+	err := mgm.Coll(record).First(bson.M{"word": word}, record)
+	if err != nil && err != mongo.ErrNoDocuments {
+		panic(err)
+	}
+	PrintWordTable([]*Record{record})
+}
+
+func TruncateRecord() {
+	if _, err := mgm.Coll(&Record{}).DeleteMany(mgm.Ctx(), bson.M{}); err != nil {
+		panic(err)
+	}
+	Success("删除成功")
+}
+
+func ReviewWords() {
+	now := time.Now().UTC()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	end := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 59, now.Location())
+	query := bson.M{"created_at": bson.M{"$gte": start, "$lt": end}}
+
+	var records []*Record
+	if err := mgm.Coll(&Record{}).SimpleFind(&records, query); err != nil {
+		panic(err)
+	}
+
+	//洗牌
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(records), func(i, j int) { records[i], records[j] = records[j], records[i] })
+
+	for _, record := range records {
+		for _, item := range record.WordSentence {
+			ok := false
+			message := fmt.Sprintf("[%s] [%s]", record.Word, item.Sentence)
+			if err := survey.AskOne(&survey.Confirm{Message: message, Default: true}, &ok, nil); err != nil {
+				panic(err)
+			}
+		}
 	}
 }
 
@@ -93,9 +213,8 @@ func main() {
 		Description: "A4背单词CLI",
 	})
 	app.AddCommand(&grumble.Command{
-		Name:    "add",
-		Help:    "添加新的单词",
-		Aliases: []string{"a"},
+		Name: "add",
+		Help: "添加新的单词",
 
 		Args: func(a *grumble.Args) {
 			a.String(Word, "英文单词/短语")
@@ -103,9 +222,60 @@ func main() {
 			a.String(Remark, "备注")
 		},
 
+		Flags: func(f *grumble.Flags) {
+			f.Bool("d", "direct", false, "添加单词后关闭随机复习")
+		},
+
 		Run: func(c *grumble.Context) error {
 			AddRecord(c.Args.String(Word), c.Args.String(Sentence), c.Args.String(Remark))
-			Success("添加成功")
+			if !c.Flags.Bool("direct") {
+				Info("开始随机复习单词")
+				ReviewWords()
+			}
+			return nil
+		},
+	})
+	app.AddCommand(&grumble.Command{
+		Name: "del",
+		Help: "删除单词",
+
+		Args: func(a *grumble.Args) {
+			a.String(Word, "英文单词/短语")
+		},
+
+		Run: func(c *grumble.Context) error {
+			DeleteRecord(c.Args.String(Word))
+			return nil
+		},
+	})
+	app.AddCommand(&grumble.Command{
+		Name: "all",
+		Help: "显示所有单词",
+
+		Run: func(c *grumble.Context) error {
+			AllRecord()
+			return nil
+		},
+	})
+	app.AddCommand(&grumble.Command{
+		Name: "show",
+		Help: "查询一个单词",
+
+		Args: func(a *grumble.Args) {
+			a.String(Word, "英文单词/短语")
+		},
+
+		Run: func(c *grumble.Context) error {
+			FindRecord(c.Args.String(Word))
+			return nil
+		},
+	})
+	app.AddCommand(&grumble.Command{
+		Name: "truncate",
+		Help: "删除所有单词",
+
+		Run: func(c *grumble.Context) error {
+			TruncateRecord()
 			return nil
 		},
 	})
