@@ -39,8 +39,8 @@ type Record struct {
 	NumReview        int64          `json:"num_review" bson:"num_review"`
 }
 
-func init() {
-	done := make(chan struct{})
+func InitDB(a *grumble.App, password, host string) {
+	done := make(chan struct{}, 1)
 	go func() {
 		bar := progressbar.NewOptions(-1,
 			progressbar.OptionSetWidth(10),
@@ -49,9 +49,16 @@ func init() {
 			//progressbar.OptionShowCount(),
 			progressbar.OptionSpinnerType(1),
 		)
+		t := time.NewTimer(20 * time.Second)
+		defer t.Stop()
+
 		for {
 			select {
 			case <-done:
+				_, _ = a.Println("\n连接数据库成功...")
+				return
+			case <-t.C:
+				panic("\n连接数据库超时，请重试...")
 				return
 			default:
 				time.Sleep(500 * time.Millisecond)
@@ -60,7 +67,7 @@ func init() {
 		}
 	}()
 
-	uri := "mongodb+srv://words:uoibcRPDTMx2kegm@cluster0.kb0tl.mongodb.net"
+	uri := fmt.Sprintf("mongodb+srv://words:%s@%s", password, host)
 	mgmOptions := options.Client().ApplyURI(uri).SetRetryWrites(true).
 		SetWriteConcern(writeconcern.New(writeconcern.WMajority()))
 	if err := mgm.SetDefaultConfig(nil, "my_words", mgmOptions); err != nil {
@@ -71,7 +78,6 @@ func init() {
 		panic(err)
 	}
 
-	fmt.Println("\n连接数据库成功...")
 	done <- struct{}{}
 }
 
@@ -211,6 +217,15 @@ func main() {
 	var app = grumble.New(&grumble.Config{
 		Name:        "my_words",
 		Description: "A4背单词CLI",
+		Flags: func(f *grumble.Flags) {
+			f.String("p", "password", "", "数据库密码")
+			f.String("u", "host", "", "数据库地址")
+		},
+	})
+
+	app.OnInit(func(a *grumble.App, flags grumble.FlagMap) error {
+		InitDB(a, flags.String("password"), flags.String("host"))
+		return nil
 	})
 	app.AddCommand(&grumble.Command{
 		Name: "add",
@@ -279,6 +294,5 @@ func main() {
 			return nil
 		},
 	})
-
 	grumble.Main(app)
 }
