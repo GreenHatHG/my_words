@@ -14,6 +14,7 @@ import (
 	"gopkg.in/AlecAivazis/survey.v1"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,16 +38,16 @@ type Record struct {
 	Word             string         `json:"word" bson:"word"`
 	WordSentence     []WordSentence `json:"word_sentence" bson:"word_sentence"`
 	NumReview        int64          `json:"num_review" bson:"num_review"`
+	ReviewTimes      []time.Time    `json:"review_times" bson:"review_times"`
 }
 
-func InitDB(a *grumble.App, password, host string) {
+func InitDB(password, host string) {
 	done := make(chan struct{}, 1)
 	go func() {
 		bar := progressbar.NewOptions(-1,
 			progressbar.OptionSetWidth(10),
 			progressbar.OptionSetDescription("开始连接数据库..."),
-			//progressbar.OptionShowIts(),
-			//progressbar.OptionShowCount(),
+			progressbar.OptionShowCount(),
 			progressbar.OptionSpinnerType(1),
 		)
 		t := time.NewTimer(20 * time.Second)
@@ -55,13 +56,12 @@ func InitDB(a *grumble.App, password, host string) {
 		for {
 			select {
 			case <-done:
-				_, _ = a.Println("\n连接数据库成功...")
 				return
 			case <-t.C:
 				panic("\n连接数据库超时，请重试...")
 				return
 			default:
-				time.Sleep(500 * time.Millisecond)
+				time.Sleep(1 * time.Second)
 				_ = bar.Add(1)
 			}
 		}
@@ -79,6 +79,7 @@ func InitDB(a *grumble.App, password, host string) {
 	}
 
 	done <- struct{}{}
+	time.Sleep(1 * time.Second)
 }
 
 func Success(format string, a ...interface{}) {
@@ -94,21 +95,33 @@ func Info(format string, a ...interface{}) {
 }
 
 func NewRecord(word, sentence, remark string) *Record {
+	now := time.Now().UTC()
+
+	reviewsInterval := []int{0, 1, 2, 4, 7, 15}
+	var reviewTimes []time.Time
+
+	for _, interval := range reviewsInterval {
+		temp := now.Add(time.Duration(interval) * 24 * time.Hour)
+		reviewDay := time.Date(temp.Year(), temp.Month(), temp.Day(), 0, 0, 0, 0, now.Location())
+		reviewTimes = append(reviewTimes, reviewDay)
+	}
+
 	return &Record{
 		Word:         word,
 		WordSentence: []WordSentence{{sentence, remark}},
 		NumReview:    0,
+		ReviewTimes:  reviewTimes,
 	}
 }
 
 func PrintWordTable(records []*Record) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Word", "Sentence", "Remark"})
+	table.SetHeader([]string{"Word", "Sentence", "Remark", "NumReview"})
 	table.SetAutoMergeCells(true)
 	table.SetRowLine(true)
 	for _, record := range records {
 		for _, item := range record.WordSentence {
-			table.Append([]string{record.Word, item.Sentence, item.Remark})
+			table.Append([]string{record.Word, item.Sentence, item.Remark, strconv.FormatInt(record.NumReview, 10)})
 		}
 	}
 	table.Render()
@@ -181,7 +194,7 @@ func FindRecord(word string) {
 }
 
 func TruncateRecord() {
-	if _, err := mgm.Coll(&Record{}).DeleteMany(mgm.Ctx(), bson.M{}); err != nil {
+	if _, err := mgm.Coll(&Record{}).DeleteMany(nil, bson.M{}); err != nil {
 		panic(err)
 	}
 	Success("删除成功")
@@ -191,18 +204,25 @@ func ReviewWords() {
 	now := time.Now().UTC()
 	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	end := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 59, now.Location())
-	query := bson.M{"created_at": bson.M{"$gte": start, "$lt": end}}
+	query := bson.M{"review_times": bson.M{"$gte": start, "$lte": end}}
 
 	var records []*Record
 	if err := mgm.Coll(&Record{}).SimpleFind(&records, query); err != nil {
 		panic(err)
 	}
 
+	if len(records) == 0 {
+		fmt.Println("==暂无需要复习的单词==")
+		return
+	}
+
 	//洗牌
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(records), func(i, j int) { records[i], records[j] = records[j], records[i] })
 
-	for _, record := range records {
+	var operations []mongo.WriteModel
+
+	for i, record := range records {
 		for _, item := range record.WordSentence {
 			ok := false
 			message := fmt.Sprintf("[%s] [%s]", record.Word, item.Sentence)
@@ -210,6 +230,14 @@ func ReviewWords() {
 				panic(err)
 			}
 		}
+		records[i].NumReview++
+		operation := mongo.NewUpdateOneModel()
+		operation.SetFilter(bson.M{"word": records[i].Word})
+		operation.SetUpdate(bson.M{"$set": bson.M{"num_review": records[i].NumReview}})
+		operations = append(operations, operation)
+	}
+	if _, err := mgm.Coll(&Record{}).BulkWrite(nil, operations); err != nil {
+		panic(err)
 	}
 }
 
@@ -224,7 +252,7 @@ func main() {
 	})
 
 	app.OnInit(func(a *grumble.App, flags grumble.FlagMap) error {
-		InitDB(a, flags.String("password"), flags.String("host"))
+		InitDB(flags.String("password"), flags.String("host"))
 		return nil
 	})
 	app.AddCommand(&grumble.Command{
@@ -291,6 +319,15 @@ func main() {
 
 		Run: func(c *grumble.Context) error {
 			TruncateRecord()
+			return nil
+		},
+	})
+	app.AddCommand(&grumble.Command{
+		Name: "review",
+		Help: "艾宾浩斯复习单词",
+
+		Run: func(c *grumble.Context) error {
+			ReviewWords()
 			return nil
 		},
 	})
